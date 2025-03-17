@@ -13,10 +13,20 @@ req() {
          --keep-session-cookies --timeout=30 -nv -O "$@"
 }
 
+# Find max version
+max() {
+    local max=0
+    while read -r v || [ -n "$v" ]; do
+        if [[ ${v//[!0-9]/} -gt ${max//[!0-9]/} ]]; then max=$v; fi
+    done
+    if [[ $max = 0 ]]; then echo ""; else echo "$max"; fi
+}
+
 # Read highest supported versions from Revanced 
 get_supported_versions() {
     package_name=$1
-    java -jar revanced-cli*.jar list-versions -f "$package_name" patch*.rvp | tail -n +3 | sed 's/ (.*)//' | grep -v -w "Any" | sort -Vr
+    output=$(java -jar revanced-cli*.jar list-versions -f "$package_name" patch*.rvp)
+    echo "$output" | tail -n +3 | sed 's/ (.*)//' | grep -v -w "Any" | sort -V -r
 }
 
 # Download necessary resources to patch from Github latest release 
@@ -33,45 +43,39 @@ download_resources() {
 
 download_resources
 
-supported_versions=($(get_supported_versions "com.google.android.youtube"))
+# Get all supported versions in descending order
+supported_versions=$(get_supported_versions "com.google.android.youtube")
 
-if [ ${#supported_versions[@]} -eq 0 ]; then
-    echo "❌ Không tìm thấy phiên bản nào được Revanced hỗ trợ."
-    exit 1
-fi
-
-echo "🔍 Danh sách phiên bản được hỗ trợ: ${supported_versions[*]}"
-
-
+# Find the version URL for the highest supported version
 url="https://youtube.en.uptodown.com/android/versions"
 data_code=$(req - "$url" | grep 'detail-app-name' | grep -oP '(?<=data-code=")[^"]+')
 page=1
+found_version=""
 while :; do
     json=$(req - "https://youtube.en.uptodown.com/android/apps/$data_code/versions/$page" | jq -r '.data')
         
     # Exit if no valid JSON or no more pages
     [ -z "$json" ] && break
         
-    # Search for version URL
-    # Tìm phiên bản phù hợp trên Uptodown
-for supported_version in "${supported_versions[@]}"; do
-    version_url=$(echo "$json" | jq -r --arg v "$supported_version" '[.[] | select(.version == $v and .kindFile == "apk")][0].versionURL // empty')
-    if [ -n "$version_url" ]; then
-        download_url=$(req - "${version_url}-x" | grep -oP '(?<=data-url=")[^"]+')
-        if [ -n "$download_url" ]; then
-            echo "📥 Đang tải về YouTube phiên bản: $supported_version"
-            req "youtube-v$supported_version.apk" "https://dw.uptodown.com/dwn/$download_url"
-            exit 0
+    # Loop through supported versions to find the first available version_url
+    for version in $supported_versions; do
+        version_url=$(echo "$json" | jq -r --arg version "$version" '[.[] | select(.version == $version and .kindFile == "apk")][0].versionURL // empty')
+        if [ -n "$version_url" ]; then
+            found_version=$version
+            break
         fi
-    fi
-done
-    if [ -n "$version_url" ]; then
+    done
+        
+    # If a version_url is found, download the APK and exit
+    if [ -n "$found_version" ]; then
         download_url=$(req - "${version_url}-x" | grep -oP '(?<=data-url=")[^"]+')
-        [ -n "$download_url" ] && req "youtube-v$version.apk" "https://dw.uptodown.com/dwn/$download_url" && break
+        [ -n "$download_url" ] && req "youtube-v$found_version.apk" "https://dw.uptodown.com/dwn/$download_url"
+        break
     fi
         
-    # Check if all versions are less than target version
-    all_lower=$(echo "$json" | jq -r --arg version "$version" '.[] | select(.kindFile == "apk") | .version | select(. < $version)' | wc -l)
+    # Check if all versions are less than the lowest supported version
+    lowest_supported_version=$(echo "$supported_versions" | tail -n 1)
+    all_lower=$(echo "$json" | jq -r --arg version "$lowest_supported_version" '.[] | select(.kindFile == "apk") | .version | select(. < $version)' | wc -l)
     total_versions=$(echo "$json" | jq -r '.[] | select(.kindFile == "apk") | .version' | wc -l)
     [ "$all_lower" -eq "$total_versions" ] && break
 
